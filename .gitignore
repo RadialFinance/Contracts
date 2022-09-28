@@ -1,2 +1,6 @@
 node_modules
 package-lock.json
+artifacts/*
+cache/*
+typechain/*
+.DS_Store

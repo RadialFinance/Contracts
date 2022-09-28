@@ -3,26 +3,22 @@ pragma solidity 0.8.15;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-interface IDepositor {
-    function whitelist(address _token, int256 _votes) external;
-}
-
-interface IRadialVoting {
-    function getVotingPower(address user) external returns(uint256);
-}
+import "../interfaces/IRadialVoting.sol";
+import "../interfaces/IDepositor.sol";
 
 contract WhitelistingBribeManager {
     uint256 constant WEEK = 60*60*24*7;
     IDepositor immutable DEPOSITOR;
     IRadialVoting immutable RADIAL_VOTING;
     uint256 immutable START_TIME;
-    mapping(address => bool) isWhitelisted;
-    // briber -> tokenToWhitelist -> week -> token -> bribeAmount
-    mapping(address => mapping(address => mapping(uint256 => mapping(address => uint256)))) bribes;
-    // user -> tokenToWhitelist -> week -> token -> bribeAmount
-    mapping(address => mapping(address => mapping(uint256 => mapping(address => bool)))) bribeClaimed;
-    // tokenToWhitelist -> week -> token -> bribeAmount
-    mapping(address => mapping(uint256 => mapping(address => uint256))) tokenBribes;
+
+    mapping(address => bool) public isWhitelisted;
+    // briber -> tokenToWhitelist -> week -> bribeAmount
+    mapping(address => mapping(address => mapping(uint256 => uint256))) public bribes;
+    // user -> tokenToWhitelist -> week -> bribeAmount
+    mapping(address => mapping(address => mapping(uint256 => bool))) public bribeClaimed;
+    // tokenToWhitelist -> week -> bribeAmount
+    mapping(address => mapping(uint256 => uint256)) public tokenBribes;
     // user -> tokenToWhitelist -> week -> votes
     mapping(address => mapping(address => mapping(uint256 => uint256))) votesUsed;
     // user -> tokenToWhitelist -> week -> votes
@@ -30,7 +26,13 @@ contract WhitelistingBribeManager {
     // tokenToWhitelist -> week -> votes
     mapping(address => mapping(uint256 => int256)) tokenVotes;
     // tokenToWhitelist -> week -> votes
-    mapping(address => mapping(uint256 => uint256)) totalRewardWeight;
+    mapping(address => mapping(uint256 => uint256)) public totalRewardWeight;
+
+    event BribeDeposited(address indexed user, address indexed tokenToWhitelist, uint256 indexed week, uint256 bribeAmount);
+    event BribeWithdrawn(address indexed user, address indexed tokenToWhitelist, uint256 indexed week, uint256 bribeAmount);
+    event Voted(address indexed user, address indexed tokenToWhitelist, uint256 indexed week, int256 votes);
+    event BribeClaimed(address indexed user, address indexed whitelistedToken, uint256 indexed week, uint256 amount);
+    event TokenWhitelistedInSolidly(address indexed token, int256 votes, uint256 currentWeek);
 
     constructor(address _depositor, address _radialVoting, uint256 _startTime) {
         DEPOSITOR = IDepositor(_depositor);
@@ -38,37 +40,29 @@ contract WhitelistingBribeManager {
         START_TIME = _startTime;
     }
 
-    // TODO: Investigate possibility of attacks using tokens with receive callbacks
-    function deposit(address _tokenToWhitelist, address[] memory _bribeTokens, uint256[] memory _bribeAmounts) external {
+    function deposit(address _tokenToWhitelist, uint256 _bribeAmount) external payable {
         require(!isWhitelisted[_tokenToWhitelist], "already whitelisted");
-        require(_bribeTokens.length == _bribeAmounts.length, "Invalid inputs");
         uint256 _currentWeek = getWeek();
-        for(uint256 i; i < _bribeTokens.length; i++) {
-            address _token = _bribeTokens[i];
-            uint256 _amount = _bribeAmounts[i];
-            require(_amount != 0, "0 bribe");
+        require(_bribeAmount != 0, "0 bribe");
+        require(msg.value == _bribeAmount, "Insufficient tokens");
 
-            IERC20(_token).transferFrom(msg.sender, address(this), _amount);
-            bribes[msg.sender][_tokenToWhitelist][_currentWeek][_token] += _amount;
-            tokenBribes[_tokenToWhitelist][_currentWeek][_token] += _amount;
-        }
+        bribes[msg.sender][_tokenToWhitelist][_currentWeek] += _bribeAmount;
+        tokenBribes[_tokenToWhitelist][_currentWeek] += _bribeAmount;
+        emit BribeDeposited(msg.sender, _tokenToWhitelist, _currentWeek, _bribeAmount);
     }
 
-    function withdraw(address _tokenToWhitelist, uint256 _week, address[] memory _bribeTokens) external {
+    function withdraw(address _tokenToWhitelist, uint256 _week) external {
         require(!isWhitelisted[_tokenToWhitelist], "whitelisted");
         uint256 _currentWeek = getWeek();
-        require(_week > _currentWeek, "proposal not over");
-        for(uint256 i; i < _bribeTokens.length; i++) {
-            address _token = _bribeTokens[i];
-            uint256 _amount = bribes[msg.sender][_tokenToWhitelist][_week][_token];
+        require(_week < _currentWeek, "proposal not over");
+        uint256 _amount = bribes[msg.sender][_tokenToWhitelist][_week];
+        require(_amount != 0, "no bribe");
 
-            if(_amount == 0) continue;
+        delete bribes[msg.sender][_tokenToWhitelist][_week];
+        tokenBribes[_tokenToWhitelist][_week] -= _amount;
 
-            delete bribes[msg.sender][_tokenToWhitelist][_week][_token];
-            delete tokenBribes[_tokenToWhitelist][_week][_token];
-
-            IERC20(_token).transfer(msg.sender, _amount);
-        }
+        payable(msg.sender).transfer(_amount);
+        emit BribeWithdrawn(msg.sender, _tokenToWhitelist, _week, _amount);
     }
 
     function vote(address _tokenWhitelist, int256 _votes) external {
@@ -93,28 +87,37 @@ contract WhitelistingBribeManager {
         totalRewardWeight[_tokenWhitelist][_currentWeek] = uint256(_poolRewardWeight);
         votes[msg.sender][_tokenWhitelist][_currentWeek] = _newUserVotes;
         votesUsed[msg.sender][_tokenWhitelist][_currentWeek] = _usedVotes + _absVotes;
+        emit Voted(msg.sender, _tokenWhitelist, _currentWeek, _votes);
     }
 
     function whitelist(address _tokenToWhitelist) external {
+        require(!isWhitelisted[_tokenToWhitelist], "whitelisted");
         uint256 _currentWeek = getWeek();
-        DEPOSITOR.whitelist(_tokenToWhitelist, tokenVotes[_tokenToWhitelist][_currentWeek]);
+        int256 _votes = tokenVotes[_tokenToWhitelist][_currentWeek];
+        DEPOSITOR.whitelist(_tokenToWhitelist, _votes);
         isWhitelisted[_tokenToWhitelist] = true;
+        emit TokenWhitelistedInSolidly(_tokenToWhitelist, _votes, _currentWeek);
     }
 
-    function claimBribes(address _whitelistedToken, uint256 _week, address[] memory _bribeTokens) external {
+    function claimBribes(address[] memory _whitelistedTokens, uint256[] memory _weeks) external {
+        require(_whitelistedTokens.length == _weeks.length, "invalid inputs");
+        for(uint256 i=0; i < _weeks.length; i++) {
+            claimBribes(_whitelistedTokens[i], _weeks[i]);
+        }
+    }
+
+    function claimBribes(address _whitelistedToken, uint256 _week) public {
         require(isWhitelisted[_whitelistedToken], "not whitelisted");
         int256 _userVote = votes[msg.sender][_whitelistedToken][_week];
         uint256 _totalTokenVotes = totalRewardWeight[_whitelistedToken][_week];
         require(_userVote > 0 && _totalTokenVotes > 0, "not voted for token");
-        for(uint256 i; i < _bribeTokens.length; i++) {
-            address _token = _bribeTokens[i];
-            require(!bribeClaimed[msg.sender][_whitelistedToken][_week][_token], "claimed");
-            uint256 _totalTokenBribe = tokenBribes[_whitelistedToken][_week][_token];
-            uint256 _userBribe = uint256(_userVote) * _totalTokenBribe / _totalTokenVotes;
-            bribeClaimed[msg.sender][_whitelistedToken][_week][_token] = true;
+        require(!bribeClaimed[msg.sender][_whitelistedToken][_week], "claimed");
+        bribeClaimed[msg.sender][_whitelistedToken][_week] = true;
+        uint256 _totalTokenBribe = tokenBribes[_whitelistedToken][_week];
+        uint256 _userBribe = uint256(_userVote) * _totalTokenBribe / _totalTokenVotes;
 
-            IERC20(_token).transfer(msg.sender, _userBribe);
-        }
+        payable(msg.sender).transfer(_userBribe);
+        emit BribeClaimed(msg.sender, _whitelistedToken, _week, _userBribe);
     }
 
     function getWeek() public view returns (uint256) {

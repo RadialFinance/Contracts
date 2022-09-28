@@ -2,9 +2,12 @@
 pragma solidity 0.8.15;
 
 interface SolidPair {
-    // TODO: Verify if RDL is token1 in the pair
-    function reserve1() external returns (uint256);
+    function observationLength() external returns (uint256);
+    function observations(uint256 index) external returns (uint256, uint256, uint256);
     function totalSupply() external returns (uint256);
+    function token0() external returns(address);
+    function token1() external returns(address);
+    function getReserves() external view returns (uint _reserve0, uint _reserve1, uint _blockTimestampLast);
 }
 
 contract RadialVoting {
@@ -41,21 +44,21 @@ contract RadialVoting {
         _;
     }
 
-    function receiveLP(address _from, uint256 _amount) public onlyLPManager {
+    function receiveLP(address _from, uint256 _amount) external onlyLPManager {
         lpDeposits[_from] = _deposit(lpDeposits[_from], _amount);
     }
 
-    function receiveRDL(address _from, uint256 _amount) public onlyRDLManager {
+    function receiveRDL(address _from, uint256 _amount) external onlyRDLManager {
         rdlDeposits[_from] = _deposit(rdlDeposits[_from], _amount);
     }
 
     // can't withdraw deposit in the same week
-    function withdrawLP(address _from, uint256 _amount) public onlyLPManager {
+    function withdrawLP(address _from, uint256 _amount) external onlyLPManager {
         lpDeposits[_from] = _withdraw(lpDeposits[_from], _amount);
     }
 
     // can't withdraw deposit in the same week
-    function withdrawRDL(address _from, uint256 _amount) public onlyRDLManager {
+    function withdrawRDL(address _from, uint256 _amount) external onlyRDLManager {
         rdlDeposits[_from] = _withdraw(rdlDeposits[_from], _amount);
     }
 
@@ -84,7 +87,7 @@ contract RadialVoting {
         return _depositInfo;
     }
 
-    function getVotingPower(address _user) public returns(uint256) {
+    function getVotingPower(address _user) external returns(uint256) {
         Deposit memory _lpDeposit = lpDeposits[_user];
         Deposit memory _rdlDeposit = rdlDeposits[_user];
         uint256 _currentWeek = getWeek();
@@ -94,13 +97,21 @@ contract RadialVoting {
         rdlDeposits[_user] = _rdlDeposit;
         uint256 _lpVotingPower;
         if(_lpDeposit.unlocked != 0) {
-            _lpVotingPower = RDL_FTM_POOL.reserve1()*_lpDeposit.unlocked/RDL_FTM_POOL.totalSupply();
+            _lpVotingPower = getFairRDLReserve()*_lpDeposit.unlocked/RDL_FTM_POOL.totalSupply();
         }
         uint256 _rdlVotingPower = _rdlDeposit.unlocked;
-        return _lpVotingPower + _rdlVotingPower;
+        return (_lpVotingPower + _rdlVotingPower)/1e18;
     }
 
-    function balanceOfLP(address _user) public view returns(uint256) {
+    function getFairRDLReserve() public returns(uint256) {
+        uint256 _lastObsIndex = RDL_FTM_POOL.observationLength() - 1;
+        (uint256 _t1Last, , uint256 _cr1Last) = RDL_FTM_POOL.observations(_lastObsIndex);
+        (uint256 _t1Before, , uint256 _cr1Before) = RDL_FTM_POOL.observations(_lastObsIndex - 1);
+
+        return (_cr1Last - _cr1Before)/(_t1Last - _t1Before);
+    }
+
+    function balanceOfLP(address _user) external view returns(uint256) {
         Deposit memory _lpDeposit = lpDeposits[_user];
         return _lpDeposit.locked + _lpDeposit.unlocked;
     }

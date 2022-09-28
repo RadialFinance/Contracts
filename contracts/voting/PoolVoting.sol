@@ -1,16 +1,11 @@
 //SPDX-License-Identifier: MIT
 pragma solidity ^0.8.15;
 
+import "../interfaces/IRadialVoting.sol";
+import "../interfaces/IDepositor.sol";
+
 interface ISolidlyVoter {
     function gauges(address pool) external returns(address);
-}
-
-interface IRadialVoting {
-    function getVotingPower(address user) external returns(uint256);
-}
-
-interface IDepositor {
-    function vote(address[] memory pools, int256[] memory weights) external;
 }
 
 contract PoolVoting {
@@ -27,26 +22,30 @@ contract PoolVoting {
     IDepositor immutable DEPOSITOR;
     ISolidlyVoter immutable SOLIDLY_VOTER;
     address immutable FIXED_VOTE_POOL;
+
     // user -> pool -> week -> votes
-    mapping(address => mapping(address => mapping(uint256 => int256))) userVotes;
+    mapping(address => mapping(address => mapping(uint256 => int256))) public userVotes;
     // user -> week -> votes
     mapping(address => mapping(uint256 => uint256)) userWeeklyVotes;
-    
-    // user -> pool[]
-    mapping(address => address[]) userPools;
+    // week -> votes
+    mapping(uint256 => uint256) totalWeeklyVotes;
+
     // pool -> week -> votes
-    mapping(address => mapping(uint256 => int256)) poolVotes;
+    mapping(address => mapping(uint256 => int256)) public poolVotes;
     // pool -> week -> votes
     mapping(address => mapping(uint256 => int256)) public poolRewardWeight;
     // pool -> index in poolList
-    mapping(address => PoolData) poolData;
+    mapping(address => PoolData) public poolData;
     // week -> topVotes id 24, votes 40
-    mapping(uint256 => uint64[MAX_POOLS_TO_VOTE]) topVotes;
-    address[] poolList;
+    mapping(uint256 => uint64[MAX_POOLS_TO_VOTE]) public topVotes;
+    address[] public poolList;
     uint256 presentWeek;
-    uint256 topVotesSize;
-    uint256 minTopVotes;
+    uint256 public topVotesSize;
+    uint256 public minTopVotes;
     uint256 minTopVoteIndex;
+
+    event Voted(address indexed user, uint256 indexed week, address[] pools, int256[] votes);
+    event VoteOnSolidlyGauges(address[] _pools, int256[] _weights, uint256 _currentWeek);
 
     constructor(uint256 _startTime, address _radialVoting, address _depositor, address _solidlyVoter, address _fixedVotePool) {
         START_TIME = _startTime;
@@ -54,10 +53,15 @@ contract PoolVoting {
         DEPOSITOR = IDepositor(_depositor);
         SOLIDLY_VOTER = ISolidlyVoter(_solidlyVoter);
         FIXED_VOTE_POOL = _fixedVotePool;
+        poolList.push(address(0));
     }
 
     function getUserVoteData(address _user, address _pool, uint256 _week) public view returns(int256, int256) {
         return (userVotes[_user][_pool][_week], poolRewardWeight[_pool][_week]);
+    }
+
+    function getWeeklyVoteData(address _user, uint256 _week) public view returns(uint256, uint256) {
+        return (userWeeklyVotes[_user][_week], totalWeeklyVotes[_week]);
     }
 
     function vote(address[] memory _pools, int256[] memory _votes) public {
@@ -90,19 +94,20 @@ contract PoolVoting {
                 uint256 _absVotes = abs(_vote);
 
                 require(_votingPower >= _absVotes + _votesThisWeek, "votes more than voting power");
+                totalWeeklyVotes[_currentWeek] += _absVotes;
                 _votesThisWeek += _absVotes;
             }
 
             int256 _poolVotesThisWeek = poolVotes[_pool][_currentWeek];
             uint256 _poolIndex = poolData[_pool].index;
 
-            if(_poolVotesThisWeek == 0 || poolData[_pool].week <= _currentWeek) {
+            if(_poolVotesThisWeek == 0 || poolData[_pool].week < _currentWeek) {
                 require(SOLIDLY_VOTER.gauges(_pool) != address(0), "Pool doesnt have gauge");
                 if(_poolIndex == 0) {
                     _poolIndex = poolList.length;
                     poolList.push(_pool);
                 }
-                poolData[_pool] = PoolData(uint24(_poolIndex), uint16(_currentWeek), 0);
+                poolData[_pool] = PoolData(uint64(_poolIndex), uint64(_currentWeek), 0);
             }
 
             _poolVotesThisWeek += _vote;
@@ -169,6 +174,8 @@ contract PoolVoting {
         topVotesSize = _topVotesSize;
         minTopVotes = _minTopVotes;
         minTopVoteIndex = _minTopVoteIndex;
+
+        emit Voted(msg.sender, _currentWeek, _pools, _votes);
     }
 
     function _updateUserVotes(address _pool, int256 _vote, uint256 _currentWeek) internal {
@@ -189,6 +196,7 @@ contract PoolVoting {
     function submitVotes() external {
         (address[] memory _pools, int256[] memory _weights) = _currentWeekVotes();
         DEPOSITOR.vote(_pools,_weights);
+        emit VoteOnSolidlyGauges(_pools, _weights, getWeek());
     }
 
     function _currentWeekVotes() public view returns(address[] memory _pools, int256[] memory _weights){
@@ -225,6 +233,11 @@ contract PoolVoting {
             _weights[_votingSize - 1] = _fixedWeight;
         } else {
             _weights[_fixedVoteId - 1] += _fixedWeight;
+            _votingSize--;
+            assembly {
+                mstore(_pools, _votingSize)
+                mstore(_weights, _votingSize)
+            }
         }
 
         return (_pools, _weights);
